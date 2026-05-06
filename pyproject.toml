@@ -1,0 +1,9 @@
+[project]
+name = "rttf-fetch-agent"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+]
