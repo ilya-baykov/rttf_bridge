@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
@@ -9,7 +10,9 @@ from loguru import logger
 
 def configure_logging(level_name: str, log_dir: Path) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "rttf-agent.log"
+    started_at = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_file = log_dir / f"rttf-agent-{started_at}.log"
+    latest_log_file = log_dir / "latest.log"
 
     logger.remove()
     logger.add(
@@ -21,8 +24,13 @@ def configure_logging(level_name: str, log_dir: Path) -> Path:
         log_file,
         level=level_name.upper(),
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{function}:{line} - {message}",
-        rotation="10 MB",
-        retention=10,
+        encoding="utf-8",
+    )
+    logger.add(
+        latest_log_file,
+        level=level_name.upper(),
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{function}:{line} - {message}",
+        mode="w",
         encoding="utf-8",
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)

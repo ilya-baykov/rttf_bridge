@@ -4,7 +4,7 @@ setlocal
 cd /d "%~dp0"
 
 echo Запуск RTTF агента...
-echo Лог пишется в: %cd%\logs\rttf-agent.log
+echo Логи пишутся в: %cd%\logs
 echo.
 
 where uv >nul 2>nul

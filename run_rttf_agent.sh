@@ -2,7 +2,7 @@
 cd "$(dirname "$0")" || exit 1
 
 echo "Запуск RTTF агента..."
-echo "Лог пишется в: $(pwd)/logs/rttf-agent.log"
+echo "Логи пишутся в: $(pwd)/logs"
 echo
 
 if ! command -v uv >/dev/null 2>&1; then

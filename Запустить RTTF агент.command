@@ -2,7 +2,7 @@
 cd "$(dirname "$0")"
 
 echo "Запуск RTTF агента..."
-echo "Лог пишется в: $(pwd)/logs/rttf-agent.log"
+echo "Логи пишутся в: $(pwd)/logs"
 echo
 
 uv run python main.py
