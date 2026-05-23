@@ -8,7 +8,6 @@ from loguru import logger
 
 from .models import FetchResult
 
-
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -28,12 +27,33 @@ class RttfPageFetcher:
         self._concurrency = concurrency
         self._timeout = timeout
 
-    async def _fetch_one(self, client: httpx.AsyncClient, semaphore: asyncio.Semaphore, url: str) -> FetchResult:
+    @staticmethod
+    async def _fetch_one(client: httpx.AsyncClient, semaphore: asyncio.Semaphore, url: str) -> FetchResult:
         async with semaphore:
             logger.info("Downloading RTTF page: {}", url)
             try:
                 response = await client.get(url)
                 response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                error_type = f"HTTP_{status_code}"
+                error_message = str(exc) or repr(exc)
+
+                logger.warning(
+                    "RTTF download failed: {} status={} error={} message={}",
+                    url,
+                    status_code,
+                    error_type,
+                    error_message,
+                )
+
+                return FetchResult(
+                    url=url,
+                    status_code=status_code,
+                    final_url=str(exc.response.url),
+                    error_type=error_type,
+                    error_message=error_message,
+                )
             except httpx.HTTPError as exc:
                 error_type = type(exc).__name__
                 error_message = str(exc) or repr(exc)
@@ -53,19 +73,19 @@ class RttfPageFetcher:
             return FetchResult(url=url, html=html, status_code=response.status_code, final_url=final_url)
 
     async def fetch_pages(
-        self,
-        urls: list[str],
-        *,
-        progress_callback: Callable[[int, int, FetchResult], None] | None = None,
+            self,
+            urls: list[str],
+            *,
+            progress_callback: Callable[[int, int, FetchResult], None] | None = None,
     ) -> list[FetchResult]:
         if not urls:
             return []
 
         semaphore = asyncio.Semaphore(self._concurrency)
         async with httpx.AsyncClient(
-            headers=DEFAULT_HEADERS,
-            timeout=httpx.Timeout(self._timeout),
-            follow_redirects=True,
+                headers=DEFAULT_HEADERS,
+                timeout=httpx.Timeout(self._timeout),
+                follow_redirects=True,
         ) as client:
             tasks = [asyncio.create_task(self._fetch_one(client, semaphore, url)) for url in urls]
             results: list[FetchResult] = []

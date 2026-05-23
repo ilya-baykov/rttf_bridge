@@ -57,3 +57,25 @@ class RttfAgentApiClient:
             payload.get("unknown"),
         )
         return payload
+
+    async def submit_failures(self, failures: list[dict[str, str]]) -> dict[str, Any]:
+        url = api_url(self._base_url, "/api/v1/rttf-agent/failures/")
+        logger.info("Submitting {} RTTF failure(s) to {}", len(failures), url)
+
+        response = await self._client.post(
+            url,
+            headers=self._headers(),
+            json={"failures": failures},
+        )
+
+        logger.info("Failures response received: status={}", response.status_code)
+        response.raise_for_status()
+
+        payload = response.json()
+        logger.info(
+            "Failures summary parsed: received={} reset={} skipped={}",
+            payload.get("received"),
+            payload.get("reset"),
+            payload.get("skipped"),
+        )
+        return payload

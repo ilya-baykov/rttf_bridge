@@ -72,8 +72,8 @@ def _pages_payload_size(pages: list[dict[str, str]]) -> int:
 
 
 def _split_pages_by_payload_size(
-    pages: list[dict[str, str]],
-    max_bytes: int,
+        pages: list[dict[str, str]],
+        max_bytes: int,
 ) -> list[list[dict[str, str]]]:
     batches: list[list[dict[str, str]]] = []
     current: list[dict[str, str]] = []
@@ -114,9 +114,9 @@ def _merge_summary(target: dict[str, Any], source: dict[str, Any]) -> None:
 
 
 async def _submit_pages_in_batches(
-    api_client: RttfAgentApiClient,
-    pages: list[dict[str, str]],
-    max_bytes: int,
+        api_client: RttfAgentApiClient,
+        pages: list[dict[str, str]],
+        max_bytes: int,
 ) -> dict[str, Any]:
     batches = _split_pages_by_payload_size(pages, max_bytes)
     logger.info("Submitting results in {} batch(es), max_payload_bytes={}", len(batches), max_bytes)
@@ -135,6 +135,17 @@ async def _submit_pages_in_batches(
         _merge_summary(summary, batch_summary)
 
     return summary
+
+
+def _build_failures_payload(failed: list[FetchResult]) -> list[dict[str, str]]:
+    return [
+        {
+            "url": item.url,
+            "error_type": item.error_type or "UNKNOWN_ERROR",
+            "message": item.error_message or "",
+        }
+        for item in failed
+    ]
 
 
 async def run(settings: Settings) -> int:
@@ -190,7 +201,15 @@ async def run(settings: Settings) -> int:
                 item.error_type,
                 item.error_message,
             )
-
+        failures = _build_failures_payload(failed)
+        if failures:
+            failures_summary = await api_client.submit_failures(failures)
+            print(
+                "Ошибки загрузки отправлены: "
+                f"received={failures_summary.get('received')}, "
+                f"reset={failures_summary.get('reset')}, "
+                f"skipped={failures_summary.get('skipped')}"
+            )
         if not pages:
             print("Не удалось успешно скачать ни одной страницы.")
             return 1
