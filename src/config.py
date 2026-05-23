@@ -58,6 +58,7 @@ class Settings:
     concurrency: int
     timeout: float
     limit: int
+    submit_max_bytes: int
     log_level: str
     log_dir: Path
 
@@ -70,6 +71,7 @@ def load_settings() -> tuple[Settings, Path | None]:
         concurrency=int(os.getenv("RTTF_AGENT_CONCURRENCY", "1")),
         timeout=float(os.getenv("RTTF_AGENT_TIMEOUT", "30")),
         limit=int(os.getenv("RTTF_AGENT_LIMIT", "0")),
+        submit_max_bytes=int(os.getenv("RTTF_AGENT_SUBMIT_MAX_BYTES", "750000")),
         log_level=os.getenv("RTTF_AGENT_LOG_LEVEL", "INFO").strip().upper(),
         log_dir=Path(os.getenv("RTTF_AGENT_LOG_DIR", str(PROJECT_ROOT / "logs"))).expanduser(),
     )

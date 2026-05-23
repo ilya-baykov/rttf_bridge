@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -24,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--concurrency", type=int, help="Количество одновременных запросов к RTTF.")
     parser.add_argument("--timeout", type=float, help="HTTP-таймаут в секундах.")
     parser.add_argument("--limit", type=int, help="Обработать только первые N URL. 0 означает все.")
+    parser.add_argument(
+        "--submit-max-bytes",
+        type=int,
+        help="Максимальный размер JSON-запроса с результатами в байтах.",
+    )
     parser.add_argument("--log-level", help="Уровень логирования, например INFO или DEBUG.")
     parser.add_argument("--log-dir", help="Папка для файлов логов.")
     return parser
@@ -36,6 +43,9 @@ def _apply_cli_overrides(settings: Settings, args: argparse.Namespace) -> Settin
         concurrency=args.concurrency if args.concurrency is not None else settings.concurrency,
         timeout=args.timeout if args.timeout is not None else settings.timeout,
         limit=args.limit if args.limit is not None else settings.limit,
+        submit_max_bytes=(
+            args.submit_max_bytes if args.submit_max_bytes is not None else settings.submit_max_bytes
+        ),
         log_level=(args.log_level or settings.log_level).strip().upper(),
         log_dir=Path(args.log_dir).expanduser() if args.log_dir else settings.log_dir,
     )
@@ -57,14 +67,85 @@ def _progress_logger(completed: int, total: int, result: FetchResult) -> None:
     )
 
 
+def _pages_payload_size(pages: list[dict[str, str]]) -> int:
+    return len(json.dumps({"pages": pages}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _split_pages_by_payload_size(
+    pages: list[dict[str, str]],
+    max_bytes: int,
+) -> list[list[dict[str, str]]]:
+    batches: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+
+    for page in pages:
+        candidate = [*current, page]
+        if current and _pages_payload_size(candidate) > max_bytes:
+            batches.append(current)
+            current = [page]
+        else:
+            current = candidate
+
+        if len(current) == 1:
+            page_size = _pages_payload_size(current)
+            if page_size > max_bytes:
+                logger.warning(
+                    "Single RTTF page payload exceeds submit limit: url={} payload_bytes={} max_bytes={}",
+                    page.get("url"),
+                    page_size,
+                    max_bytes,
+                )
+
+    if current:
+        batches.append(current)
+
+    return batches
+
+
+def _merge_summary(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in ("profiles", "updated", "failed", "unknown"):
+        value = source.get(key, 0)
+        if isinstance(value, int):
+            target[key] = target.get(key, 0) + value
+
+    errors = source.get("errors", [])
+    if isinstance(errors, list):
+        target.setdefault("errors", []).extend(errors)
+
+
+async def _submit_pages_in_batches(
+    api_client: RttfAgentApiClient,
+    pages: list[dict[str, str]],
+    max_bytes: int,
+) -> dict[str, Any]:
+    batches = _split_pages_by_payload_size(pages, max_bytes)
+    logger.info("Submitting results in {} batch(es), max_payload_bytes={}", len(batches), max_bytes)
+
+    summary: dict[str, Any] = {"profiles": 0, "updated": 0, "failed": 0, "unknown": 0, "errors": []}
+    for index, batch in enumerate(batches, start=1):
+        payload_size = _pages_payload_size(batch)
+        logger.info(
+            "Submitting batch {}/{}: pages={} payload_bytes={}",
+            index,
+            len(batches),
+            len(batch),
+            payload_size,
+        )
+        batch_summary = await api_client.submit_pages(batch)
+        _merge_summary(summary, batch_summary)
+
+    return summary
+
+
 async def run(settings: Settings) -> int:
     logger.info("Starting RTTF agent")
     logger.info(
-        "Runtime settings: base_url={} concurrency={} timeout={} limit={} token_set={}",
+        "Runtime settings: base_url={} concurrency={} timeout={} limit={} submit_max_bytes={} token_set={}",
         settings.base_url,
         settings.concurrency,
         settings.timeout,
         settings.limit,
+        settings.submit_max_bytes,
         bool(settings.token),
     )
 
@@ -74,6 +155,10 @@ async def run(settings: Settings) -> int:
 
     if settings.concurrency < 1:
         print("RTTF_AGENT_CONCURRENCY должен быть >= 1.", file=sys.stderr)
+        return 2
+
+    if settings.submit_max_bytes < 1:
+        print("RTTF_AGENT_SUBMIT_MAX_BYTES должен быть >= 1.", file=sys.stderr)
         return 2
 
     async with RttfAgentApiClient(settings.base_url, settings.token, settings.timeout) as api_client:
@@ -110,7 +195,7 @@ async def run(settings: Settings) -> int:
             print("Не удалось успешно скачать ни одной страницы.")
             return 1
 
-        summary = await api_client.submit_pages(pages)
+        summary = await _submit_pages_in_batches(api_client, pages, settings.submit_max_bytes)
         print(
             "Серверная синхронизация завершена: "
             f"profiles={summary.get('profiles')}, "

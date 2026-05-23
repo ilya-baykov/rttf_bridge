@@ -6,7 +6,10 @@
 
 1. Скопируйте `.env.example` в `.env`.
 2. Заполните `RTTF_AGENT_BASE_URL` и `RTTF_AGENT_TOKEN`.
-3. При необходимости настройте `RTTF_AGENT_CONCURRENCY`, `RTTF_AGENT_TIMEOUT` и `RTTF_AGENT_LOG_DIR`.
+3. При необходимости настройте `RTTF_AGENT_CONCURRENCY`, `RTTF_AGENT_TIMEOUT`, `RTTF_AGENT_SUBMIT_MAX_BYTES` и `RTTF_AGENT_LOG_DIR`.
+
+`RTTF_AGENT_SUBMIT_MAX_BYTES` ограничивает размер одного JSON-запроса с HTML-результатами.
+По умолчанию агент отправляет результаты батчами до 750000 байт, чтобы не упираться в лимиты nginx на размер тела запроса.
 
 ## Запуск
 
