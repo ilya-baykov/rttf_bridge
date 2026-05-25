@@ -10,17 +10,40 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from .api_client import RttfAgentApiClient
+from .api_client import RttfAgentApiClient, RttfAgentFlow
 from .config import Settings, load_settings
 from .logging_config import configure_logging
 from .models import FetchResult
 from .rttf_client import RttfPageFetcher
 
 
+FLOW_ALIASES = {
+    "profiles": [RttfAgentFlow.PROFILES],
+    "tournament-lists": [RttfAgentFlow.TOURNAMENT_LISTS],
+    "tournament-pages": [RttfAgentFlow.TOURNAMENT_PAGES],
+    "all": [
+        RttfAgentFlow.PROFILES,
+        RttfAgentFlow.TOURNAMENT_LISTS,
+        RttfAgentFlow.TOURNAMENT_PAGES,
+    ],
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Локально скачивает RTTF-страницы и отправляет HTML на сервер.",
     )
+
+    parser.add_argument(
+        "--flow",
+        choices=sorted(FLOW_ALIASES),
+        default="all",
+        help=(
+            "Что синхронизировать: profiles, tournament-lists, "
+            "tournament-pages или all. По умолчанию all."
+        ),
+    )
+
     parser.add_argument("--base-url", help="URL Django-сайта, например http://127.0.0.1")
     parser.add_argument("--token", help="API-токен RTTF-агента.")
     parser.add_argument("--concurrency", type=int, help="Количество одновременных запросов к RTTF.")
@@ -33,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--log-level", help="Уровень логирования, например INFO или DEBUG.")
     parser.add_argument("--log-dir", help="Папка для файлов логов.")
+
     return parser
 
 
@@ -53,6 +77,7 @@ def _apply_cli_overrides(settings: Settings, args: argparse.Namespace) -> Settin
 
 def _progress_logger(completed: int, total: int, result: FetchResult) -> None:
     remaining = total - completed
+
     if result.ok:
         logger.info("Progress: {}/{} downloaded, {} left", completed, total, remaining)
         return
@@ -68,18 +93,25 @@ def _progress_logger(completed: int, total: int, result: FetchResult) -> None:
 
 
 def _pages_payload_size(pages: list[dict[str, str]]) -> int:
-    return len(json.dumps({"pages": pages}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return len(
+        json.dumps(
+            {"pages": pages},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
 
 
 def _split_pages_by_payload_size(
-        pages: list[dict[str, str]],
-        max_bytes: int,
+    pages: list[dict[str, str]],
+    max_bytes: int,
 ) -> list[list[dict[str, str]]]:
     batches: list[list[dict[str, str]]] = []
     current: list[dict[str, str]] = []
 
     for page in pages:
         candidate = [*current, page]
+
         if current and _pages_payload_size(candidate) > max_bytes:
             batches.append(current)
             current = [page]
@@ -88,6 +120,7 @@ def _split_pages_by_payload_size(
 
         if len(current) == 1:
             page_size = _pages_payload_size(current)
+
             if page_size > max_bytes:
                 logger.warning(
                     "Single RTTF page payload exceeds submit limit: url={} payload_bytes={} max_bytes={}",
@@ -103,8 +136,13 @@ def _split_pages_by_payload_size(
 
 
 def _merge_summary(target: dict[str, Any], source: dict[str, Any]) -> None:
-    for key in ("profiles", "updated", "failed", "unknown"):
-        value = source.get(key, 0)
+    """Объединяет summary от разных батчей.
+
+    Summary у profiles и tournaments отличается по ключам,
+    поэтому суммируем все int-поля универсально.
+    """
+
+    for key, value in source.items():
         if isinstance(value, int):
             target[key] = target.get(key, 0) + value
 
@@ -114,24 +152,35 @@ def _merge_summary(target: dict[str, Any], source: dict[str, Any]) -> None:
 
 
 async def _submit_pages_in_batches(
-        api_client: RttfAgentApiClient,
-        pages: list[dict[str, str]],
-        max_bytes: int,
+    api_client: RttfAgentApiClient,
+    flow: RttfAgentFlow,
+    pages: list[dict[str, str]],
+    max_bytes: int,
 ) -> dict[str, Any]:
     batches = _split_pages_by_payload_size(pages, max_bytes)
-    logger.info("Submitting results in {} batch(es), max_payload_bytes={}", len(batches), max_bytes)
 
-    summary: dict[str, Any] = {"profiles": 0, "updated": 0, "failed": 0, "unknown": 0, "errors": []}
+    logger.info(
+        "Submitting results in {} batch(es): flow={} max_payload_bytes={}",
+        len(batches),
+        flow,
+        max_bytes,
+    )
+
+    summary: dict[str, Any] = {"errors": []}
+
     for index, batch in enumerate(batches, start=1):
         payload_size = _pages_payload_size(batch)
+
         logger.info(
-            "Submitting batch {}/{}: pages={} payload_bytes={}",
+            "Submitting batch {}/{}: flow={} pages={} payload_bytes={}",
             index,
             len(batches),
+            flow,
             len(batch),
             payload_size,
         )
-        batch_summary = await api_client.submit_pages(batch)
+
+        batch_summary = await api_client.submit_pages(flow, batch)
         _merge_summary(summary, batch_summary)
 
     return summary
@@ -148,16 +197,111 @@ def _build_failures_payload(failed: list[FetchResult]) -> list[dict[str, str]]:
     ]
 
 
-async def run(settings: Settings) -> int:
+def _print_summary(flow: RttfAgentFlow, summary: dict[str, Any]) -> None:
+    """Печатает универсальный summary, не привязанный только к profiles."""
+
+    print(f"Серверная синхронизация завершена: flow={flow}")
+
+    for key, value in summary.items():
+        if key == "errors":
+            continue
+
+        print(f"{key}={value}")
+
+    errors = summary.get("errors", [])
+    if isinstance(errors, list):
+        for error in errors:
+            if isinstance(error, dict):
+                print(
+                    f"- ошибка парсинга {error.get('url')}: "
+                    f"{error.get('error_type')} - {error.get('message')}"
+                )
+
+
+async def run_flow(
+    *,
+    settings: Settings,
+    api_client: RttfAgentApiClient,
+    flow: RttfAgentFlow,
+) -> int:
+    """Выполняет один sync-flow.
+
+    Например:
+    - profiles;
+    - tournament-lists;
+    - tournament-pages.
+    """
+
+    logger.info("Starting RTTF flow: {}", flow)
+
+    urls = await api_client.get_jobs(flow)
+
+    if settings.limit > 0:
+        logger.info("Applying limit: {}", settings.limit)
+        urls = urls[: settings.limit]
+    else:
+        logger.info("Limit disabled; processing all RTTF URLs")
+
+    if not urls:
+        logger.info("No RTTF URLs returned by Django: flow={}", flow)
+        print(f"Нет RTTF-страниц для синхронизации: flow={flow}")
+        return 0
+
+    logger.info("Fetching {} RTTF page(s): flow={}", len(urls), flow)
+
+    fetcher = RttfPageFetcher(
+        concurrency=settings.concurrency,
+        timeout=settings.timeout,
+    )
+
+    results = await fetcher.fetch_pages(
+        urls,
+        progress_callback=_progress_logger,
+    )
+
+    pages = [{"url": item.url, "html": item.html} for item in results if item.ok]
+    failed = [item for item in results if not item.ok]
+
+    logger.info(
+        "Fetch finished: flow={} success={} failed={}",
+        flow,
+        len(pages),
+        len(failed),
+    )
+
+    failures = _build_failures_payload(failed)
+
+    if failures:
+        failures_summary = await api_client.submit_failures(flow, failures)
+        print(f"Ошибки загрузки отправлены: flow={flow} summary={failures_summary}")
+
+    if not pages:
+        print(f"Не удалось успешно скачать ни одной страницы: flow={flow}")
+        return 1
+
+    summary = await _submit_pages_in_batches(
+        api_client,
+        flow,
+        pages,
+        settings.submit_max_bytes,
+    )
+
+    _print_summary(flow, summary)
+
+    return 0
+
+
+async def run(settings: Settings, flow_name: str) -> int:
     logger.info("Starting RTTF agent")
     logger.info(
-        "Runtime settings: base_url={} concurrency={} timeout={} limit={} submit_max_bytes={} token_set={}",
+        "Runtime settings: base_url={} concurrency={} timeout={} limit={} submit_max_bytes={} token_set={} flow={}",
         settings.base_url,
         settings.concurrency,
         settings.timeout,
         settings.limit,
         settings.submit_max_bytes,
         bool(settings.token),
+        flow_name,
     )
 
     if not settings.token:
@@ -172,82 +316,44 @@ async def run(settings: Settings) -> int:
         print("RTTF_AGENT_SUBMIT_MAX_BYTES должен быть >= 1.", file=sys.stderr)
         return 2
 
-    async with RttfAgentApiClient(settings.base_url, settings.token, settings.timeout) as api_client:
-        urls = await api_client.get_jobs()
+    flows = FLOW_ALIASES[flow_name]
 
-        if settings.limit > 0:
-            logger.info("Applying limit: {}", settings.limit)
-            urls = urls[: settings.limit]
-        else:
-            logger.info("Limit disabled; processing all RTTF URLs")
+    async with RttfAgentApiClient(
+        settings.base_url,
+        settings.token,
+        settings.timeout,
+    ) as api_client:
+        exit_code = 0
 
-        if not urls:
-            logger.info("No RTTF URLs returned by Django")
-            print("Нет RTTF-профилей для синхронизации.")
-            return 0
-
-        logger.info("Fetching {} RTTF page(s)", len(urls))
-        fetcher = RttfPageFetcher(concurrency=settings.concurrency, timeout=settings.timeout)
-        results = await fetcher.fetch_pages(urls, progress_callback=_progress_logger)
-
-        pages = [{"url": item.url, "html": item.html} for item in results if item.ok]
-        failed = [item for item in results if not item.ok]
-
-        logger.info("Fetch finished: success={} failed={}", len(pages), len(failed))
-        for item in failed:
-            logger.warning(
-                "Failed page: url={} error={} message={}",
-                item.url,
-                item.error_type,
-                item.error_message,
+        for flow in flows:
+            flow_exit_code = await run_flow(
+                settings=settings,
+                api_client=api_client,
+                flow=flow,
             )
-        failures = _build_failures_payload(failed)
-        if failures:
-            failures_summary = await api_client.submit_failures(failures)
-            print(
-                "Ошибки загрузки отправлены: "
-                f"received={failures_summary.get('received')}, "
-                f"reset={failures_summary.get('reset')}, "
-                f"skipped={failures_summary.get('skipped')}"
-            )
-        if not pages:
-            print("Не удалось успешно скачать ни одной страницы.")
-            return 1
 
-        summary = await _submit_pages_in_batches(api_client, pages, settings.submit_max_bytes)
-        print(
-            "Серверная синхронизация завершена: "
-            f"profiles={summary.get('profiles')}, "
-            f"updated={summary.get('updated')}, "
-            f"failed={summary.get('failed')}, "
-            f"unknown={summary.get('unknown')}"
-        )
+            if flow_exit_code != 0:
+                exit_code = flow_exit_code
 
-        errors = summary.get("errors", [])
-        if isinstance(errors, list):
-            for error in errors:
-                if isinstance(error, dict):
-                    print(
-                        f"- ошибка парсинга {error.get('url')}: "
-                        f"{error.get('error_type')} - {error.get('message')}"
-                    )
-
-    return 0
+        return exit_code
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    settings, env_file = load_settings()
 
+    settings, env_file = load_settings()
     final_settings = _apply_cli_overrides(settings, args)
+
     log_file = configure_logging(final_settings.log_level, final_settings.log_dir)
+
     if env_file is not None:
         logger.info("Loaded env from {}", env_file)
+
     logger.info("Writing logs to {}", log_file)
 
     try:
-        return asyncio.run(run(final_settings))
+        return asyncio.run(run(final_settings, args.flow))
     except httpx.HTTPStatusError as exc:
         print(f"HTTP {exc.response.status_code}: {exc.response.text}", file=sys.stderr)
         return 1
@@ -255,5 +361,6 @@ def main() -> int:
         print(f"HTTP-ошибка: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
+        logger.exception("Unexpected RTTF agent error")
         print(f"Неожиданная ошибка: {exc}", file=sys.stderr)
         return 1
